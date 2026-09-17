@@ -1,9 +1,15 @@
+"""Academic service for fetching paper metadata, citation links, and Open Access PDFs.
+
+Queries OpenAlex API for scholarly article records and top-cited references,
+and queries the Unpaywall API concurrently to discover freely accessible full-text PDF links.
+"""
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import httpx
 
@@ -14,23 +20,40 @@ logger = logging.getLogger(__name__)
 
 
 class AcademicServiceError(Exception):
-    """Base exception for academic service errors."""
+    """Base exception for all academic service operations and upstream API failures."""
 
 
 class PaperNotFoundError(AcademicServiceError):
-    """Raised when a paper cannot be found by its DOI or identifier."""
+    """Raised when a requested scientific paper cannot be resolved by its DOI or identifier."""
 
 
 def normalize_doi(doi: str) -> str:
-    """Normalize DOI string by stripping URLs and 'doi:' prefixes."""
-    clean = doi.strip()
+    """Normalize a raw DOI string by stripping URL prefixes, resolver domains, and spaces.
+
+    Args:
+        doi: Raw DOI string (e.g. 'https://doi.org/10.1038/s41586-020-2649-2' or 'doi: 10.1038/...').
+
+    Returns:
+        Cleaned canonical DOI identifier (e.g. '10.1038/s41586-020-2649-2').
+    """
+    clean: str = doi.strip()
     clean = re.sub(r"^https?://(?:dx\.)?doi\.org/", "", clean, flags=re.IGNORECASE)
     clean = re.sub(r"^doi:\s*", "", clean, flags=re.IGNORECASE)
     return clean.strip()
 
 
 def reconstruct_abstract(inverted_index: Optional[Dict[str, List[int]]]) -> Optional[str]:
-    """Reconstruct plain-text abstract from OpenAlex inverted index representation."""
+    """Reconstruct plain-text abstract from an OpenAlex inverted index dictionary.
+
+    OpenAlex provides paper abstracts as an inverted index mapping tokens to their
+    0-based word positions in the text.
+
+    Args:
+        inverted_index: Mapping from word token to array of integer positions.
+
+    Returns:
+        Reconstructed abstract string, or None if no inverted index is present.
+    """
     if not inverted_index:
         return None
 
@@ -44,19 +67,26 @@ def reconstruct_abstract(inverted_index: Optional[Dict[str, List[int]]]) -> Opti
 
 
 def extract_authors(authorships: Optional[List[Dict[str, Any]]]) -> List[Author]:
-    """Extract list of authors from OpenAlex authorships structure."""
+    """Extract structured author records and affiliations from an OpenAlex authorships array.
+
+    Args:
+        authorships: Raw list of authorships returned by OpenAlex API.
+
+    Returns:
+        List of typed Author models containing name, IDs, and affiliation.
+    """
     if not authorships:
         return []
 
     authors: List[Author] = []
     for item in authorships:
-        author_data = item.get("author") or {}
-        name = author_data.get("display_name")
+        author_data: Dict[str, Any] = item.get("author") or {}
+        name: Optional[str] = author_data.get("display_name")
         if not name:
             continue
 
-        institutions = item.get("institutions") or []
-        first_institution = institutions[0].get("display_name") if institutions else None
+        institutions: List[Dict[str, Any]] = item.get("institutions") or []
+        first_institution: Optional[str] = institutions[0].get("display_name") if institutions else None
 
         authors.append(
             Author(
@@ -69,11 +99,20 @@ def extract_authors(authorships: Optional[List[Dict[str, Any]]]) -> List[Author]
     return authors
 
 
-def extract_open_access_and_pdf(work: Dict[str, Any]) -> Tuple[OpenAccessInfo, Optional[str], Optional[str]]:
-    """Extract Open Access metadata, direct PDF URL, and landing page URL from OpenAlex work."""
-    oa_data = work.get("open_access") or {}
-    primary_loc = work.get("primary_location") or {}
-    source = primary_loc.get("source") or {}
+def extract_open_access_and_pdf(
+    work: Dict[str, Any],
+) -> Tuple[OpenAccessInfo, Optional[str], Optional[str]]:
+    """Extract Open Access metadata, direct PDF URL, and landing page from an OpenAlex record.
+
+    Args:
+        work: Raw dictionary representing an OpenAlex work entity.
+
+    Returns:
+        Tuple containing (OpenAccessInfo model, direct PDF URL if present, publisher landing page URL).
+    """
+    oa_data: Dict[str, Any] = work.get("open_access") or {}
+    primary_loc: Dict[str, Any] = work.get("primary_location") or {}
+    source: Dict[str, Any] = primary_loc.get("source") or {}
 
     oa_info = OpenAccessInfo(
         is_oa=bool(oa_data.get("is_oa")),
@@ -82,18 +121,25 @@ def extract_open_access_and_pdf(work: Dict[str, Any]) -> Tuple[OpenAccessInfo, O
         any_repository_has_fulltext=bool(oa_data.get("any_repository_has_fulltext")),
     )
 
-    pdf_url = primary_loc.get("pdf_url") or oa_info.oa_url
-    landing_page_url = primary_loc.get("landing_page_url") or work.get("doi")
+    pdf_url: Optional[str] = primary_loc.get("pdf_url") or oa_info.oa_url
+    landing_page_url: Optional[str] = primary_loc.get("landing_page_url") or work.get("doi")
 
     return oa_info, pdf_url, landing_page_url
 
 
 def parse_work_to_reference(work: Dict[str, Any]) -> PaperReference:
-    """Parse raw OpenAlex work dictionary into PaperReference model."""
+    """Parse an OpenAlex work dictionary into a compact PaperReference model.
+
+    Args:
+        work: Raw dictionary representing an OpenAlex work.
+
+    Returns:
+        Instantiated PaperReference model.
+    """
     oa_info, pdf_url, landing_page_url = extract_open_access_and_pdf(work)
-    primary_loc = work.get("primary_location") or {}
-    source = primary_loc.get("source") or {}
-    venue = source.get("display_name")
+    primary_loc: Dict[str, Any] = work.get("primary_location") or {}
+    source: Dict[str, Any] = primary_loc.get("source") or {}
+    venue: Optional[str] = source.get("display_name")
 
     return PaperReference(
         id=work.get("id") or "",
@@ -115,24 +161,34 @@ def apply_unpaywall_data(
     current_landing_page: Optional[str],
     unpaywall_data: Optional[Dict[str, Any]],
 ) -> Tuple[OpenAccessInfo, Optional[str], Optional[str]]:
-    """Enrich or override Open Access metadata and PDF URL with Unpaywall results."""
+    """Enrich or override Open Access metadata and PDF download link with Unpaywall results.
+
+    Args:
+        oa_info: Initial OpenAccessInfo from OpenAlex.
+        current_pdf_url: Current best PDF URL from OpenAlex if any.
+        current_landing_page: Current landing page URL.
+        unpaywall_data: Raw JSON payload returned by Unpaywall API v2.
+
+    Returns:
+        Tuple containing (enriched OpenAccessInfo, best direct PDF URL, landing page URL).
+    """
     if not unpaywall_data:
         return oa_info, current_pdf_url, current_landing_page
 
-    is_oa = bool(unpaywall_data.get("is_oa", oa_info.is_oa))
-    oa_status = unpaywall_data.get("oa_status") or oa_info.oa_status
-    best_loc = unpaywall_data.get("best_oa_location") or {}
+    is_oa: bool = bool(unpaywall_data.get("is_oa", oa_info.is_oa))
+    oa_status: Optional[str] = unpaywall_data.get("oa_status") or oa_info.oa_status
+    best_loc: Dict[str, Any] = unpaywall_data.get("best_oa_location") or {}
 
-    pdf_url = best_loc.get("url_for_pdf") or current_pdf_url
-    oa_url = best_loc.get("url") or pdf_url or oa_info.oa_url
-    landing_page = (
+    pdf_url: Optional[str] = best_loc.get("url_for_pdf") or current_pdf_url
+    oa_url: Optional[str] = best_loc.get("url") or pdf_url or oa_info.oa_url
+    landing_page: Optional[str] = (
         best_loc.get("url_for_landing_page")
         or unpaywall_data.get("doi_url")
         or current_landing_page
     )
-    has_repo = bool(unpaywall_data.get("has_repository_copy", oa_info.any_repository_has_fulltext))
-    license_type = best_loc.get("license") or oa_info.license
-    version = best_loc.get("version") or oa_info.version
+    has_repo: bool = bool(unpaywall_data.get("has_repository_copy", oa_info.any_repository_has_fulltext))
+    license_type: Optional[str] = best_loc.get("license") or oa_info.license
+    version: Optional[str] = best_loc.get("version") or oa_info.version
 
     enriched_oa = OpenAccessInfo(
         is_oa=is_oa,
@@ -146,16 +202,27 @@ def apply_unpaywall_data(
 
 
 class AcademicService:
-    """Service to interact with academic APIs, specifically OpenAlex and Unpaywall."""
+    """Asynchronous client service providing paper metadata, citations, and Open Access PDFs."""
 
-    OPENALEX_BASE_URL = "https://api.openalex.org"
-    UNPAYWALL_BASE_URL = "https://api.unpaywall.org/v2"
+    OPENALEX_BASE_URL: str = "https://api.openalex.org"
+    UNPAYWALL_BASE_URL: str = "https://api.unpaywall.org/v2"
 
-    def __init__(self, client: Optional[httpx.AsyncClient] = None, timeout: float = 15.0):
-        self._client = client
-        self.timeout = timeout
+    def __init__(self, client: Optional[httpx.AsyncClient] = None, timeout: float = 15.0) -> None:
+        """Initialize AcademicService.
+
+        Args:
+            client: Optional pre-configured httpx.AsyncClient instance. If omitted, client per request is used.
+            timeout: HTTP request timeout in seconds.
+        """
+        self._client: Optional[httpx.AsyncClient] = client
+        self.timeout: float = timeout
 
     def _get_headers(self) -> Dict[str, str]:
+        """Construct standard HTTP headers including polite User-Agent for OpenAlex.
+
+        Returns:
+            Dictionary of HTTP headers.
+        """
         user_agent = f"{settings.PROJECT_NAME}/{settings.VERSION}"
         if settings.OPENALEX_EMAIL:
             user_agent += f" (mailto:{settings.OPENALEX_EMAIL})"
@@ -165,6 +232,14 @@ class AcademicService:
         }
 
     def _get_openalex_params(self, extra: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Construct query parameters including polite pool mailto parameter.
+
+        Args:
+            extra: Optional dictionary of query parameters to merge.
+
+        Returns:
+            Dictionary of query parameters.
+        """
         params: Dict[str, Any] = {}
         if settings.OPENALEX_EMAIL:
             params["mailto"] = settings.OPENALEX_EMAIL
@@ -173,6 +248,11 @@ class AcademicService:
         return params
 
     def _get_unpaywall_email(self) -> str:
+        """Retrieve contact email to pass to Unpaywall API requests.
+
+        Returns:
+            Email address string.
+        """
         return settings.UNPAYWALL_EMAIL or settings.OPENALEX_EMAIL or "graphpapers.academic.app@gmail.com"
 
     async def _fetch_openalex(
@@ -181,7 +261,20 @@ class AcademicService:
         url: str,
         params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Perform an HTTP GET request against the OpenAlex API."""
+        """Execute an asynchronous HTTP GET request against the OpenAlex API.
+
+        Args:
+            client: Active httpx.AsyncClient instance.
+            url: Target URL endpoint.
+            params: Optional query parameters.
+
+        Returns:
+            Parsed JSON dictionary.
+
+        Raises:
+            PaperNotFoundError: When OpenAlex returns HTTP 404.
+            AcademicServiceError: On network or non-404 HTTP status errors.
+        """
         try:
             response = await client.get(
                 url,
@@ -205,16 +298,24 @@ class AcademicService:
         client: httpx.AsyncClient,
         doi: Optional[str],
     ) -> Optional[Dict[str, Any]]:
-        """Query the Unpaywall API for Open Access PDF link and metadata for a DOI."""
+        """Query Unpaywall API for Open Access PDF link and licensing metadata for a DOI.
+
+        Args:
+            client: Active httpx.AsyncClient instance.
+            doi: Raw or normalized DOI string.
+
+        Returns:
+            Unpaywall payload dictionary if found and open access, or None.
+        """
         if not doi:
             return None
 
-        cleaned_doi = normalize_doi(doi)
+        cleaned_doi: str = normalize_doi(doi)
         if not cleaned_doi:
             return None
 
-        url = f"{self.UNPAYWALL_BASE_URL}/{cleaned_doi}"
-        params = {"email": self._get_unpaywall_email()}
+        url: str = f"{self.UNPAYWALL_BASE_URL}/{cleaned_doi}"
+        params: Dict[str, str] = {"email": self._get_unpaywall_email()}
 
         try:
             response = await client.get(
@@ -243,18 +344,30 @@ class AcademicService:
         limit: int = 10,
         client: Optional[httpx.AsyncClient] = None,
     ) -> List[PaperReference]:
-        """Fetch the top most-cited papers from a list of OpenAlex work IDs."""
+        """Fetch top most-cited papers from a list of OpenAlex work URLs/IDs.
+
+        Queries OpenAlex in batches of up to 50 IDs, sorts references by cited_by_count descending,
+        and returns the top `limit` items.
+
+        Args:
+            referenced_works: List of OpenAlex work IDs or URIs.
+            limit: Maximum number of top references to return. Default: 10.
+            client: Optional httpx.AsyncClient. Uses internal or temporary client if None.
+
+        Returns:
+            List of PaperReference models sorted by descending citation count.
+        """
         if not referenced_works or limit <= 0:
             return []
 
         # Extract clean OpenAlex IDs (e.g., 'W3035965352' from 'https://openalex.org/W3035965352')
-        clean_ids = [ref.split("/")[-1] for ref in referenced_works if ref]
+        clean_ids: List[str] = [ref.split("/")[-1] for ref in referenced_works if ref]
         if not clean_ids:
             return []
 
         # OpenAlex allows combining IDs with '|' up to 50 items per query
-        chunk_size = 50
-        chunks = [clean_ids[i : i + chunk_size] for i in range(0, len(clean_ids), chunk_size)]
+        chunk_size: int = 50
+        chunks: List[List[str]] = [clean_ids[i : i + chunk_size] for i in range(0, len(clean_ids), chunk_size)]
 
         async def fetch_chunk(c: httpx.AsyncClient, chunk_ids: List[str]) -> List[Dict[str, Any]]:
             filter_query = "|".join(chunk_ids)
@@ -282,7 +395,7 @@ class AcademicService:
         all_candidates: List[Dict[str, Any]] = [item for sublist in results_nested for item in sublist]
 
         # Deduplicate candidates by OpenAlex ID in case of overlaps
-        seen_ids = set()
+        seen_ids: Set[str] = set()
         deduped: List[Dict[str, Any]] = []
         for item in all_candidates:
             item_id = item.get("id")
@@ -292,17 +405,29 @@ class AcademicService:
 
         # Sort descending by citation count and take top `limit`
         deduped.sort(key=lambda x: x.get("cited_by_count") or 0, reverse=True)
-        top_slice = deduped[:limit]
+        top_slice: List[Dict[str, Any]] = deduped[:limit]
 
         return [parse_work_to_reference(work) for work in top_slice]
 
     async def get_paper_by_doi(self, doi: str) -> PaperDetails:
-        """Retrieve paper metadata and top 10 most-cited references, enriching OA PDF links via Unpaywall."""
-        cleaned_doi = normalize_doi(doi)
+        """Retrieve paper metadata and top 10 most-cited references, enriching OA PDF links via Unpaywall.
+
+        Args:
+            doi: Target paper DOI string or resolver URL.
+
+        Returns:
+            Validated PaperDetails model containing target metadata and enriched references.
+
+        Raises:
+            ValueError: If the normalized DOI string is empty.
+            PaperNotFoundError: If paper does not exist in OpenAlex.
+            AcademicServiceError: If upstream API network/HTTP errors occur.
+        """
+        cleaned_doi: str = normalize_doi(doi)
         if not cleaned_doi:
             raise ValueError("DOI must not be empty.")
 
-        work_url = f"{self.OPENALEX_BASE_URL}/works/https://doi.org/{cleaned_doi}"
+        work_url: str = f"{self.OPENALEX_BASE_URL}/works/https://doi.org/{cleaned_doi}"
 
         if self._client:
             return await self._process_paper(self._client, work_url, cleaned_doi)
@@ -316,13 +441,22 @@ class AcademicService:
         work_url: str,
         cleaned_doi: str,
     ) -> PaperDetails:
-        """Internal helper to fetch OpenAlex metadata, top references, and Unpaywall OA concurrently."""
+        """Internal helper to fetch OpenAlex metadata, top references, and Unpaywall OA concurrently.
+
+        Args:
+            client: Active httpx.AsyncClient.
+            work_url: OpenAlex works URL for the target paper.
+            cleaned_doi: Cleaned DOI identifier.
+
+        Returns:
+            Enriched PaperDetails model.
+        """
         # 1. Fetch main paper metadata from OpenAlex
-        work_data = await self._fetch_openalex(client, work_url)
-        referenced_works = work_data.get("referenced_works") or []
+        work_data: Dict[str, Any] = await self._fetch_openalex(client, work_url)
+        referenced_works: List[str] = work_data.get("referenced_works") or []
 
         # 2. Fetch top 10 most-cited references from OpenAlex
-        top_references = await self.get_top_references(
+        top_references: List[PaperReference] = await self.get_top_references(
             referenced_works=referenced_works,
             limit=10,
             client=client,
@@ -336,12 +470,12 @@ class AcademicService:
         ]
         unpaywall_results = await asyncio.gather(*unpaywall_tasks, return_exceptions=True)
 
-        target_unpaywall = (
+        target_unpaywall: Optional[Dict[str, Any]] = (
             unpaywall_results[0]
             if unpaywall_results and not isinstance(unpaywall_results[0], Exception)
             else None
         )
-        references_unpaywall = [
+        references_unpaywall: List[Optional[Dict[str, Any]]] = [
             res if not isinstance(res, Exception) else None
             for res in unpaywall_results[1:]
         ]
@@ -364,7 +498,7 @@ class AcademicService:
                 current_landing_page=ref.landing_page_url,
                 unpaywall_data=ref_unpaywall,
             )
-            enriched_ref = ref.model_copy(
+            enriched_ref: PaperReference = ref.model_copy(
                 update={
                     "open_access": ref_oa,
                     "pdf_url": ref_pdf,
@@ -373,9 +507,9 @@ class AcademicService:
             )
             enriched_references.append(enriched_ref)
 
-        primary_loc = work_data.get("primary_location") or {}
-        source = primary_loc.get("source") or {}
-        venue = source.get("display_name")
+        primary_loc: Dict[str, Any] = work_data.get("primary_location") or {}
+        source: Dict[str, Any] = primary_loc.get("source") or {}
+        venue: Optional[str] = source.get("display_name")
 
         return PaperDetails(
             id=work_data.get("id") or "",

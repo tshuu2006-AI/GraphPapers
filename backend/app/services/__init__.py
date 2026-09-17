@@ -1,3 +1,9 @@
-from app.services.academic import AcademicService
+"""Service layer handling academic external data aggregation and processing."""
 
-__all__ = ["AcademicService"]
+from app.services.academic import AcademicService, AcademicServiceError, PaperNotFoundError
+
+__all__: list[str] = [
+    "AcademicService",
+    "AcademicServiceError",
+    "PaperNotFoundError",
+]

@@ -1,3 +1,9 @@
+"""Domain schemas and data transfer objects for academic papers and citation networks.
+
+Provides Pydantic models for papers, authors, Open Access licensing, and standard
+node-link graph structures compatible with Cytoscape, D3, and NetworkX.
+"""
+
 from __future__ import annotations
 
 from typing import List, Optional
@@ -5,23 +11,27 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 class Author(BaseModel):
+    """Academic author entity containing identity and affiliation metadata."""
+
     model_config = ConfigDict(extra="ignore")
 
-    name: str
-    id: Optional[str] = None
-    orcid: Optional[str] = None
-    institution: Optional[str] = None
+    name: str = Field(description="Full display name of the author")
+    id: Optional[str] = Field(default=None, description="Unique author identifier (e.g. OpenAlex ID)")
+    orcid: Optional[str] = Field(default=None, description="ORCID researcher identifier URI")
+    institution: Optional[str] = Field(default=None, description="Primary institutional affiliation name")
 
 
 class OpenAccessInfo(BaseModel):
+    """Open Access status, licensing, and repository access metadata."""
+
     model_config = ConfigDict(extra="ignore")
 
-    is_oa: bool = False
-    oa_status: Optional[str] = None
-    oa_url: Optional[str] = None
-    any_repository_has_fulltext: bool = False
-    license: Optional[str] = None
-    version: Optional[str] = None
+    is_oa: bool = Field(default=False, description="Whether the paper is openly accessible")
+    oa_status: Optional[str] = Field(default=None, description="OA category (gold, green, hybrid, bronze, closed)")
+    oa_url: Optional[str] = Field(default=None, description="Canonical open access full-text URL")
+    any_repository_has_fulltext: bool = Field(default=False, description="Whether an OA copy exists in any repository")
+    license: Optional[str] = Field(default=None, description="Copyright license code (e.g. cc-by)")
+    version: Optional[str] = Field(default=None, description="Manuscript version (e.g. publishedVersion)")
 
 
 class PaperReference(BaseModel):
@@ -66,12 +76,12 @@ class PaperDetails(BaseModel):
 
     @property
     def references(self) -> List[PaperReference]:
-        """Convenience alias for top_references."""
+        """Convenience alias for top_references list."""
         return self.top_references
 
 
 class GraphNode(BaseModel):
-    """Represents a node in the citation graph."""
+    """Represents an individual node in the citation graph."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -116,8 +126,15 @@ class GraphData(BaseModel):
 
     @classmethod
     def from_paper_details(cls, paper: PaperDetails) -> GraphData:
-        """Construct a standard node-link GraphData instance from PaperDetails."""
-        target_id = paper.id or paper.doi or "target"
+        """Construct a standard node-link GraphData instance from a PaperDetails object.
+
+        Args:
+            paper: PaperDetails instance containing seed paper info and top references.
+
+        Returns:
+            GraphData instance with target and reference nodes plus directed citation links.
+        """
+        target_id: str = paper.id or paper.doi or "target"
         target_node = GraphNode(
             id=target_id,
             label=paper.title,
@@ -137,7 +154,7 @@ class GraphData(BaseModel):
         links: List[GraphEdge] = []
 
         for ref in paper.top_references:
-            ref_id = ref.id or ref.doi or f"ref_{len(nodes)}"
+            ref_id: str = ref.id or ref.doi or f"ref_{len(nodes)}"
             ref_node = GraphNode(
                 id=ref_id,
                 label=ref.title,

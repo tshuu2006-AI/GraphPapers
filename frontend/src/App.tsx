@@ -2,6 +2,9 @@ import React, { useState } from "react";
 import { GraphCanvas } from "./components/GraphCanvas";
 import { GraphData, GraphNode } from "./types";
 
+/**
+ * Sample mock citation dataset demonstrating seed paper and top references.
+ */
 const SAMPLE_GRAPH_DATA: GraphData = {
   target_id: "W3035965352",
   nodes: [
@@ -76,26 +79,58 @@ const SAMPLE_GRAPH_DATA: GraphData = {
   ],
 };
 
-export const App: React.FC = () => {
+/**
+ * Props for the application header bar.
+ */
+export interface AppHeaderProps {
+  /** Currently selected paper node, or null if none is selected. */
+  selectedNode: GraphNode | null;
+}
+
+/**
+ * Top application navigation and selection header.
+ *
+ * @param props - Header props conforming to {@link AppHeaderProps}.
+ * @returns Rendered header element.
+ */
+export const AppHeader: React.FC<AppHeaderProps> = ({
+  selectedNode,
+}): React.ReactElement => {
+  return (
+    <header className="px-6 py-4 bg-white border-b border-slate-200 shadow-sm flex items-center justify-between">
+      <h1 className="text-xl font-bold text-slate-800">Academic Citation Graph Visualizer</h1>
+      {selectedNode && (
+        <div className="text-sm text-slate-600">
+          Selected: <span className="font-semibold text-slate-900">{selectedNode.title}</span> (
+          {selectedNode.citation_count.toLocaleString()} citations)
+        </div>
+      )}
+    </header>
+  );
+};
+
+/**
+ * Main application root component hosting the citation graph visualizer interface.
+ *
+ * @returns Root application React component element.
+ */
+export const App: React.FC = (): React.ReactElement => {
   const [selectedNode, setSelectedNode] = useState<GraphNode | null>(null);
+
+  /** Handler invoked when user selects a paper node on the canvas */
+  const handleNodeSelect = (node: GraphNode): void => {
+    setSelectedNode(node);
+  };
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-100 font-sans">
-      <header className="px-6 py-4 bg-white border-b border-slate-200 shadow-sm flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-800">Academic Citation Graph Visualizer</h1>
-        {selectedNode && (
-          <div className="text-sm text-slate-600">
-            Selected: <span className="font-semibold text-slate-900">{selectedNode.title}</span> (
-            {selectedNode.citation_count.toLocaleString()} citations)
-          </div>
-        )}
-      </header>
+      <AppHeader selectedNode={selectedNode} />
 
       <main className="flex-1 p-4 relative">
         <GraphCanvas
           data={SAMPLE_GRAPH_DATA}
           selectedNodeId={selectedNode?.id}
-          onNodeClick={(node) => setSelectedNode(node)}
+          onNodeClick={handleNodeSelect}
           className="w-full h-full shadow-sm"
         />
       </main>

@@ -1,3 +1,6 @@
+"""Application entrypoint initializing FastAPI, middlewares, and route registrations."""
+
+from typing import Any, Dict
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -7,7 +10,15 @@ from app.core.config import settings
 
 
 def create_application() -> FastAPI:
-    application = FastAPI(
+    """Instantiate and configure the FastAPI application.
+
+    Configures CORS middleware, registers health check and API v1 routers,
+    and sets OpenAPI documentation endpoints.
+
+    Returns:
+        Configured FastAPI application instance.
+    """
+    application: FastAPI = FastAPI(
         title=settings.PROJECT_NAME,
         version=settings.VERSION,
         debug=settings.DEBUG,
@@ -27,11 +38,16 @@ def create_application() -> FastAPI:
     # Root health check endpoint (GET /health)
     application.include_router(health_router)
 
-    # API endpoints prefixed with /api (GET /api/health, GET /api/papers, etc.)
+    # API endpoints prefixed with /api (GET /api/health, GET /api/papers, GET /api/graph, etc.)
     application.include_router(api_router, prefix=settings.API_V1_STR)
 
     @application.get("/", tags=["Root"])
-    async def root():
+    async def root() -> Dict[str, Any]:
+        """Root welcome endpoint providing service status and documentation links.
+
+        Returns:
+            Dictionary containing welcome message, version, docs, and health URL.
+        """
         return {
             "message": f"Welcome to {settings.PROJECT_NAME}",
             "version": settings.VERSION,
@@ -42,7 +58,7 @@ def create_application() -> FastAPI:
     return application
 
 
-app = create_application()
+app: FastAPI = create_application()
 
 
 if __name__ == "__main__":
